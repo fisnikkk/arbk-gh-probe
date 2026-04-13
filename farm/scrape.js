@@ -33,6 +33,7 @@ const SUMMARY_FILE = path.join(OUT_DIR, "summary.json");
 const stats = {
   startId: START_ID,
   endId: END_ID,
+  runnerIp: process.env.RUNNER_IP || "unknown",
   startedAt: new Date().toISOString(),
   attempted: 0,
   solveOk: 0,

@@ -1,0 +1,23 @@
+{
+  "startId": 110250,
+  "endId": 110264,
+  "startedAt": "2026-04-13T13:20:33.918Z",
+  "attempted": 15,
+  "solveOk": 15,
+  "solveFail": 0,
+  "fetch200": 7,
+  "fetch401": 8,
+  "fetch500": 0,
+  "fetchErr": 0,
+  "recordsSaved": 7,
+  "consecErrors": 0,
+  "abortedEarly": false,
+  "firstFewErrors": [
+    "110253: 401 {\"type\":\"https://tools.ietf.org/html/rfc7235#section-3.1\",\"title\":\"Unauthorized\",\"status\":401,\"trace",
+    "110254: 401 {\"type\":\"https://tools.ietf.org/html/rfc7235#section-3.1\",\"title\":\"Unauthorized\",\"status\":401,\"trace",
+    "110255: 401 {\"type\":\"https://tools.ietf.org/html/rfc7235#section-3.1\",\"title\":\"Unauthorized\",\"status\":401,\"trace",
+    "110259: 401 {\"type\":\"https://tools.ietf.org/html/rfc7235#section-3.1\",\"title\":\"Unauthorized\",\"status\":401,\"trace",
+    "110260: 401 {\"type\":\"https://tools.ietf.org/html/rfc7235#section-3.1\",\"title\":\"Unauthorized\",\"status\":401,\"trace"
+  ],
+  "finishedAt": "2026-04-13T13:21:34.223Z"
+}
