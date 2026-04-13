@@ -70,77 +70,94 @@ function saveState(state) {
 }
 
 function sh(cmd, opts = {}) {
-  return execSync(cmd, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", ...opts });
+  // Default 20s timeout so a hung gh CLI doesn't stall the whole loop.
+  // Callers that need longer (download of many artifacts) can override.
+  const timeoutMs = opts.timeoutMs != null ? opts.timeoutMs : 20000;
+  return execSync(cmd, {
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+    ...opts,
+  });
 }
 
-function shLive(cmd, opts = {}) {
-  return execSync(cmd, { stdio: "inherit", ...opts });
+function sleep(ms) {
+  // Busy-wait via execSync with a clean child — blocks cleanly, unlike
+  // a pure setTimeout (since this is called from a sync flow).
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    try { execSync(`node -e "setTimeout(()=>{}, ${Math.min(ms, 1000)})"`, { timeout: ms + 5000 }); break; }
+    catch { /* shouldn't happen but be safe */ break; }
+  }
 }
 
 function triggerBatch(startId) {
   console.log(`[${new Date().toISOString().slice(11, 19)}] triggering batch starting at ${startId}...`);
-  sh(`gh workflow run ${WORKFLOW} --repo ${REPO} -f start_id=${startId}`);
-  // GitHub takes a moment to register the run. Poll briefly for the new run ID.
+  sh(`gh workflow run ${WORKFLOW} --repo ${REPO} -f start_id=${startId}`, { timeoutMs: 30000 });
   for (let i = 0; i < 10; i++) {
     try {
       const out = sh(
-        `gh run list --repo ${REPO} --workflow=${WORKFLOW} --limit 1 --json databaseId,status,createdAt`
+        `gh run list --repo ${REPO} --workflow=${WORKFLOW} --limit 1 --json databaseId,status,createdAt`,
+        { timeoutMs: 15000 }
       );
       const runs = JSON.parse(out);
       if (runs.length > 0) {
-        // Check the run was created very recently (within last 60s)
         const created = new Date(runs[0].createdAt).getTime();
-        if (Date.now() - created < 60000) {
+        if (Date.now() - created < 120000) {
           return runs[0].databaseId;
         }
       }
     } catch {}
-    execSync(`node -e "setTimeout(()=>{}, 1500)"`);
+    sleep(1500);
   }
   throw new Error("couldn't find the new run after trigger");
 }
 
 function waitForRun(runId) {
   console.log(`  waiting for run ${runId} to finish...`);
-  // Poll with gh run view --json instead of gh run watch. Watch has unreliable
-  // exit codes (warnings/annotations can make it return non-zero even when
-  // all jobs actually succeeded).
-  const maxWaitSec = 600; // 10 min max per batch (should be ~2 min normally)
+  // Poll with gh api (lower-level, fewer moving parts than gh run view).
+  const maxWaitSec = 600; // 10 min max per batch
   const startedAt = Date.now();
+  let errorCount = 0;
   while (Date.now() - startedAt < maxWaitSec * 1000) {
     try {
       const out = sh(
-        `gh run view ${runId} --repo ${REPO} --json status,conclusion`
+        `gh api repos/${REPO}/actions/runs/${runId} --jq "{status,conclusion}"`,
+        { timeoutMs: 15000 }
       );
       const r = JSON.parse(out);
       if (r.status === "completed") {
-        return r.conclusion; // "success" | "failure" | "cancelled" etc
+        return r.conclusion || "unknown";
       }
+      errorCount = 0; // reset on good poll
     } catch (e) {
-      // Transient network error polling — log and keep waiting
-      console.log(`  (poll error: ${e.message.slice(0, 60)} — retrying)`);
+      errorCount++;
+      if (errorCount <= 3 || errorCount % 10 === 0) {
+        console.log(`  (poll error ${errorCount}: ${e.message.slice(0, 60)})`);
+      }
+      // If we've hit 20 consecutive poll errors, give up on this run
+      if (errorCount >= 20) {
+        console.log(`  too many poll errors — giving up on ${runId}`);
+        return "poll-exhausted";
+      }
     }
-    // Sleep 6s between polls
-    execSync(`node -e "setTimeout(()=>{}, 6000)"`);
+    sleep(5000);
   }
   return "timeout";
 }
 
 function downloadArtifacts(runId, dir) {
   fs.mkdirSync(dir, { recursive: true });
-  // Retry the download up to 3 times with increasing backoff.
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      sh(`gh run download ${runId} --repo ${REPO} --dir "${dir}"`);
-      break; // success
+      sh(`gh run download ${runId} --repo ${REPO} --dir "${dir}"`, { timeoutMs: 120000 });
+      break;
     } catch (e) {
       console.log(`  download attempt ${attempt}/3 failed: ${e.message.slice(0, 80)}`);
-      if (attempt < 3) {
-        execSync(`node -e "setTimeout(()=>{}, ${attempt * 10000})"`); // 10s, 20s backoff
-      }
+      if (attempt < 3) sleep(attempt * 10000); // 10s, 20s
     }
   }
-  // Count artifacts actually downloaded
   const subdirs = fs.existsSync(dir)
     ? fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory())
     : [];
@@ -212,7 +229,7 @@ async function main() {
       if (!isRetry) state.nextStartId = batchEndId + 1;
       saveState(state);
       console.log(`  sleeping 60s before next batch`);
-      execSync(`node -e "setTimeout(()=>{}, 60000)"`);
+      sleep(60000);
       continue;
     }
 
