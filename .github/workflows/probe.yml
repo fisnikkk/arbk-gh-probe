@@ -32,7 +32,7 @@ jobs:
 
       - name: Clone cf-clearance-scraper
         run: |
-          git clone --depth 1 https://github.com/Body-Alhoha/cf-clearance-scraper.git /tmp/cf
+          git clone --depth 1 https://github.com/zfcsoftware/cf-clearance-scraper.git /tmp/cf
           cd /tmp/cf
           npm install --silent
 
