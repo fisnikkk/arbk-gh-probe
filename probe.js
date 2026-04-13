@@ -1,8 +1,8 @@
 // End-to-end probe: solve one Turnstile token locally, call ARBK with it, report.
 // Runs after the token server has already been started in the workflow.
 
-const axios = require("/tmp/cf/node_modules/axios");
-const CryptoJS = require("/tmp/cf/node_modules/crypto-js");
+const axios = require("axios");
+const CryptoJS = require("crypto-js");
 
 const BASE_URL = "https://arbk.rks-gov.net";
 const AES_KEY = "8056483646328769";

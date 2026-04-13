@@ -47,10 +47,8 @@ jobs:
           echo "--- port 3000 check ---"
           ss -tlnp | grep 3000 || echo "port 3000 not listening"
 
-      - name: Install probe dependencies (axios, crypto-js)
-        run: |
-          # Probe reuses modules from /tmp/cf which already has them
-          ls /tmp/cf/node_modules/axios/package.json /tmp/cf/node_modules/crypto-js/package.json
+      - name: Install probe dependencies
+        run: npm install --silent axios crypto-js
 
       - name: Run probe
         run: node probe.js
