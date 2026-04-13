@@ -11,6 +11,10 @@ on:
         description: 'Ending nRegjistriId (inclusive)'
         required: true
         default: '110219'
+      delay_ms:
+        description: 'Delay between calls (ms)'
+        required: false
+        default: '0'
 
 jobs:
   scrape:
@@ -53,6 +57,7 @@ jobs:
         env:
           START_ID: ${{ github.event.inputs.start_id }}
           END_ID: ${{ github.event.inputs.end_id }}
+          DELAY_MS: ${{ github.event.inputs.delay_ms }}
           OUT_DIR: ${{ github.workspace }}/out
         run: node farm/scrape.js
 

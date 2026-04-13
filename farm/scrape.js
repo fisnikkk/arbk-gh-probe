@@ -21,7 +21,10 @@ const TOKEN_URL = "http://localhost:3000/cf-clearance-scraper";
 const START_ID = parseInt(process.env.START_ID || "110200", 10);
 const END_ID = parseInt(process.env.END_ID || "110219", 10);
 const MAX_ERRORS = parseInt(process.env.MAX_ERRORS || "20", 10);
+const DELAY_MS = parseInt(process.env.DELAY_MS || "0", 10);
 const OUT_DIR = process.env.OUT_DIR || "/tmp/out";
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const RECORDS_FILE = path.join(OUT_DIR, "records.jsonl");
@@ -135,6 +138,8 @@ async function main() {
         stats.abortedEarly = true;
         break;
       }
+
+      if (DELAY_MS > 0 && id < END_ID) await sleep(DELAY_MS);
     }
   } finally {
     writeSummary();
