@@ -42,11 +42,26 @@ function loadState() {
       nextStartId: 110350,
       totalInserted: 0,
       totalAttempted: 0,
+      retryQueue: [],
       batches: [],
       startedAt: new Date().toISOString(),
     };
   }
-  return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  const s = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  s.retryQueue = s.retryQueue || [];
+  return s;
+}
+
+function claimNextRange(state) {
+  // Retries take priority — they're batches that failed earlier with 0 artifacts
+  if (state.retryQueue.length > 0) {
+    const r = state.retryQueue.shift();
+    return { startId: r.startId, endId: r.endId, isRetry: true };
+  }
+  if (state.nextStartId >= MAX_ID) return null;
+  const startId = state.nextStartId;
+  const endId = Math.min(startId + BATCH_SIZE - 1, MAX_ID);
+  return { startId, endId, isRetry: false };
 }
 
 function saveState(state) {
@@ -87,26 +102,48 @@ function triggerBatch(startId) {
 
 function waitForRun(runId) {
   console.log(`  waiting for run ${runId} to finish...`);
-  // gh run watch blocks until completion
-  try {
-    sh(`gh run watch ${runId} --repo ${REPO} --exit-status`);
-    return "success";
-  } catch (e) {
-    // Run finished with non-zero exit — could be partial success (some matrix jobs failed)
-    // That's OK, we'll still download what artifacts exist
-    return "partial";
+  // Poll with gh run view --json instead of gh run watch. Watch has unreliable
+  // exit codes (warnings/annotations can make it return non-zero even when
+  // all jobs actually succeeded).
+  const maxWaitSec = 600; // 10 min max per batch (should be ~2 min normally)
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxWaitSec * 1000) {
+    try {
+      const out = sh(
+        `gh run view ${runId} --repo ${REPO} --json status,conclusion`
+      );
+      const r = JSON.parse(out);
+      if (r.status === "completed") {
+        return r.conclusion; // "success" | "failure" | "cancelled" etc
+      }
+    } catch (e) {
+      // Transient network error polling — log and keep waiting
+      console.log(`  (poll error: ${e.message.slice(0, 60)} — retrying)`);
+    }
+    // Sleep 6s between polls
+    execSync(`node -e "setTimeout(()=>{}, 6000)"`);
   }
+  return "timeout";
 }
 
 function downloadArtifacts(runId, dir) {
   fs.mkdirSync(dir, { recursive: true });
-  try {
-    sh(`gh run download ${runId} --repo ${REPO} --dir "${dir}"`);
-  } catch (e) {
-    console.log(`  warning: artifact download had errors: ${e.message.slice(0, 100)}`);
+  // Retry the download up to 3 times with increasing backoff.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      sh(`gh run download ${runId} --repo ${REPO} --dir "${dir}"`);
+      break; // success
+    } catch (e) {
+      console.log(`  download attempt ${attempt}/3 failed: ${e.message.slice(0, 80)}`);
+      if (attempt < 3) {
+        execSync(`node -e "setTimeout(()=>{}, ${attempt * 10000})"`); // 10s, 20s backoff
+      }
+    }
   }
-  // Count artifacts
-  const subdirs = fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory());
+  // Count artifacts actually downloaded
+  const subdirs = fs.existsSync(dir)
+    ? fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory())
+    : [];
   return subdirs.length;
 }
 
@@ -148,59 +185,83 @@ async function main() {
   console.log(`  max_id:       ${MAX_ID}`);
   console.log(`  total so far: ${state.totalInserted} inserted`);
   console.log(`  batches:      ${state.batches.length} completed`);
+  console.log(`  retry queue:  ${state.retryQueue.length} pending`);
   console.log("");
 
   let batchesRun = 0;
   const loopStart = Date.now();
   let runningInserted = 0;
 
-  while (state.nextStartId < MAX_ID && batchesRun < maxBatches) {
-    const batchStartId = state.nextStartId;
-    const batchEndId = Math.min(batchStartId + BATCH_SIZE - 1, MAX_ID);
+  while (batchesRun < maxBatches) {
+    const claim = claimNextRange(state);
+    if (!claim) break;
+    const { startId: batchStartId, endId: batchEndId, isRetry } = claim;
     batchesRun++;
 
-    console.log(`\n── Batch ${batchesRun} — IDs ${batchStartId}..${batchEndId} ──`);
+    const tag = isRetry ? "RETRY" : "new";
+    console.log(`\n── Batch ${batchesRun} [${tag}] — IDs ${batchStartId}..${batchEndId} ──`);
 
     let runId;
     try {
       runId = triggerBatch(batchStartId);
       console.log(`  run ${runId}`);
     } catch (e) {
-      console.log(`  💥 trigger failed: ${e.message}`);
-      console.log(`  sleeping 60s before retry`);
+      console.log(`  💥 trigger failed: ${e.message.slice(0, 150)}`);
+      // put the range back in the retry queue so we don't lose it
+      state.retryQueue.push({ startId: batchStartId, endId: batchEndId, lastErr: "trigger: " + e.message.slice(0, 80) });
+      if (!isRetry) state.nextStartId = batchEndId + 1;
+      saveState(state);
+      console.log(`  sleeping 60s before next batch`);
       execSync(`node -e "setTimeout(()=>{}, 60000)"`);
       continue;
     }
 
-    const status = waitForRun(runId);
-    console.log(`  run finished: ${status}`);
+    const conclusion = waitForRun(runId);
+    console.log(`  run finished: ${conclusion}`);
 
     const batchDir = path.join(WORK_DIR, `batch-${batchStartId}`);
+    // Clear any previous attempt directory so we don't count stale files
+    if (fs.existsSync(batchDir)) fs.rmSync(batchDir, { recursive: true, force: true });
     const artifactCount = downloadArtifacts(runId, batchDir);
     console.log(`  downloaded ${artifactCount} artifacts`);
+
+    // CRITICAL: if nothing was downloaded, DON'T advance state.nextStartId.
+    // Push the range into the retry queue to re-attempt later.
+    if (artifactCount === 0) {
+      console.log(`  ⚠️  no artifacts downloaded — queuing for retry`);
+      state.retryQueue.push({
+        startId: batchStartId,
+        endId: batchEndId,
+        runId,
+        lastErr: "download returned 0 artifacts",
+      });
+      if (!isRetry) state.nextStartId = batchEndId + 1;
+      saveState(state);
+      continue;
+    }
 
     let insertResult = { inserted: 0, attempted: 0 };
     try {
       insertResult = mergeBatch(batchDir);
     } catch (e) {
-      console.log(`  💥 merge failed: ${e.message}`);
+      console.log(`  💥 merge failed: ${e.message.slice(0, 150)}`);
     }
 
-    // Update state
-    state.nextStartId = batchEndId + 1;
+    // Success — update state and advance cursor (if not retry)
+    if (!isRetry) state.nextStartId = batchEndId + 1;
     state.totalInserted += insertResult.inserted;
     state.totalAttempted += insertResult.attempted;
     state.batches.push({
       startId: batchStartId,
       endId: batchEndId,
       runId,
-      status,
+      status: conclusion,
       artifactCount,
       recordsAttempted: insertResult.attempted,
       recordsInserted: insertResult.inserted,
+      isRetry,
       at: new Date().toISOString(),
     });
-    // Keep only the last 50 batch entries in state to avoid bloat
     if (state.batches.length > 50) state.batches = state.batches.slice(-50);
     saveState(state);
 
@@ -208,7 +269,7 @@ async function main() {
     const elapsedMin = (Date.now() - loopStart) / 60000;
     const ratePerHr = (runningInserted / elapsedMin) * 60;
     console.log(
-      `  ✅ batch ${batchesRun} done: ${insertResult.inserted} new → total session: ${runningInserted} | rate: ${ratePerHr.toFixed(0)} new/hr`
+      `  ✅ batch ${batchesRun} done: ${insertResult.inserted} new → total session: ${runningInserted} | rate: ${ratePerHr.toFixed(0)} new/hr | retry queue: ${state.retryQueue.length}`
     );
 
     if (once) break;
