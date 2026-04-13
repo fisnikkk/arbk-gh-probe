@@ -1,0 +1,72 @@
+name: ARBK farm
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_id:
+        description: 'Starting nRegjistriId (inclusive)'
+        required: true
+        default: '110200'
+      end_id:
+        description: 'Ending nRegjistriId (inclusive)'
+        required: true
+        default: '110219'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner public IP
+        run: echo "runner IP $(curl -s --max-time 8 https://api.ipify.org)"
+
+      - name: Install xvfb
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Clone cf-clearance-scraper
+        run: |
+          git clone --depth 1 https://github.com/zfcsoftware/cf-clearance-scraper.git /tmp/cf
+          cd /tmp/cf
+          npm install --silent
+
+      - name: Start cf-clearance-scraper in background
+        run: |
+          cd /tmp/cf
+          nohup xvfb-run -a -s "-screen 0 1280x1024x24" node src/index.js > /tmp/cf.log 2>&1 &
+          echo "started, waiting 30s for browser boot..."
+          sleep 30
+          tail -30 /tmp/cf.log
+          ss -tlnp | grep 3000 || echo "port 3000 not listening"
+
+      - name: Install scrape dependencies
+        run: npm install --silent axios crypto-js
+
+      - name: Run scrape
+        env:
+          START_ID: ${{ github.event.inputs.start_id }}
+          END_ID: ${{ github.event.inputs.end_id }}
+          OUT_DIR: ${{ github.workspace }}/out
+        run: node farm/scrape.js
+
+      - name: Upload records artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: records-${{ github.event.inputs.start_id }}-${{ github.event.inputs.end_id }}
+          path: out/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Dump cf-clearance-scraper log on failure
+        if: failure()
+        run: |
+          echo "--- final cf.log ---"
+          cat /tmp/cf.log || true
