@@ -1,0 +1,62 @@
+name: ARBK probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner public IP
+        run: |
+          echo "runner IP: $(curl -s --max-time 8 https://api.ipify.org)"
+
+      - name: Sanity: can we reach arbk.rks-gov.net at all?
+        run: |
+          echo "--- GetDate ---"
+          curl -s --max-time 10 -o /tmp/getdate.txt -w "status=%{http_code} time=%{time_total}\n" https://arbk.rks-gov.net/api/api/Home/GetDate
+          cat /tmp/getdate.txt
+          echo ""
+
+      - name: Install xvfb
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Clone cf-clearance-scraper
+        run: |
+          git clone --depth 1 https://github.com/Body-Alhoha/cf-clearance-scraper.git /tmp/cf
+          cd /tmp/cf
+          npm install --silent
+
+      - name: Start cf-clearance-scraper in background (with xvfb)
+        run: |
+          cd /tmp/cf
+          nohup xvfb-run -a -s "-screen 0 1280x1024x24" node src/index.js > /tmp/cf.log 2>&1 &
+          echo "started, waiting 30s for browser boot..."
+          sleep 30
+          echo "--- cf-clearance-scraper log ---"
+          cat /tmp/cf.log
+          echo "--- port 3000 check ---"
+          ss -tlnp | grep 3000 || echo "port 3000 not listening"
+
+      - name: Install probe dependencies (axios, crypto-js)
+        run: |
+          # Probe reuses modules from /tmp/cf which already has them
+          ls /tmp/cf/node_modules/axios/package.json /tmp/cf/node_modules/crypto-js/package.json
+
+      - name: Run probe
+        run: node probe.js
+
+      - name: Dump cf-clearance-scraper log on failure
+        if: failure()
+        run: |
+          echo "--- final cf.log ---"
+          cat /tmp/cf.log || true
