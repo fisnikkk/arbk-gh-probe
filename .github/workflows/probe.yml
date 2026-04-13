@@ -15,7 +15,7 @@ jobs:
         run: |
           echo "runner IP: $(curl -s --max-time 8 https://api.ipify.org)"
 
-      - name: Sanity: can we reach arbk.rks-gov.net at all?
+      - name: Sanity reachability check
         run: |
           echo "--- GetDate ---"
           curl -s --max-time 10 -o /tmp/getdate.txt -w "status=%{http_code} time=%{time_total}\n" https://arbk.rks-gov.net/api/api/Home/GetDate
